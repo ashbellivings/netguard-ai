@@ -1,0 +1,222 @@
+import { SecurityAlert, DetectionPrediction, CleanedFlowRecord, AlertStatus, SeverityLevel } from '../types';
+
+const STORAGE_KEY = 'netguard_ai_alerts_v1';
+const INCIDENTS_KEY = 'netguard_ai_incidents_v1';
+
+/**
+ * Generates recommended SOC investigation playbook steps based on attack category and severity
+ */
+export function getRecommendedActions(category: string, severity: SeverityLevel, dstPort: number): string[] {
+  switch (category) {
+    case 'DoS / DDoS':
+      return [
+        'Verify target host service availability and resource saturation (CPU/RAM/Network bandwidth).',
+        'Enable SYN cookies and configure connection rate limits on perimeter firewall/WAF.',
+        'Null-route or block the offending source IP address at border router (BGP Flowspec).',
+        'Engage upstream ISP or Cloud DDoS scrubbing provider if bandwidth saturation persists.',
+      ];
+    case 'Brute Force':
+      return [
+        `Audit server authentication logs for port ${dstPort} (e.g. /var/log/auth.log or Windows Event ID 4625).`,
+        'Check whether any login attempts succeeded from the attacking IP address.',
+        'Enforce multi-factor authentication (MFA) and verify account lockout policies.',
+        'Temporarily drop inbound connections from this source IP in perimeter security group.',
+      ];
+    case 'Port Scan':
+      return [
+        'Determine whether source IP matches authorized internal vulnerability scanners or penetration testers.',
+        'Verify which ports answered with SYN-ACK or exposed active listening services.',
+        'Harden perimeter firewall ingress rules to drop unauthorized port sweeps (stealth RST).',
+        'Add offending external IP to threat intelligence feed blocklist.',
+      ];
+    case 'Web Attack':
+      return [
+        'Inspect HTTP access logs and WAF telemetry for payload signatures (SQLi, XSS, Path Traversal).',
+        'Verify whether web application returned HTTP 500 error or exposed database errors.',
+        'Check database integrity and review recent query logs for unauthorized data extraction.',
+        'Update WAF signature rule sets and review application code sanitization.',
+      ];
+    case 'Botnet / C2':
+      return [
+        'IMMEDIATELY isolate the internal host from the local network to contain lateral movement.',
+        'Collect volatile memory dump (RAM) and network socket states using Volatility/LiME.',
+        'Block external command and control IP address and domain across enterprise DNS sinkhole.',
+        'Initiate full endpoint detection and response (EDR) deep malware scan on the patient zero host.',
+      ];
+    default:
+      return [
+        'Correlate flow metadata with host-based syslog and endpoint telemetry.',
+        'Determine if traffic corresponds to scheduled backup, batch synchronization, or developer testing.',
+        'Perform packet payload inspection if full PCAP capture is available.',
+        'Document findings in the incident investigation ledger.',
+      ];
+  }
+}
+
+/**
+ * Generate security alerts from detection predictions
+ * Deduplicates alerts based on flowId and persistent cache
+ */
+export function generateAlertsFromPredictions(
+  predictions: DetectionPrediction[],
+  flows: CleanedFlowRecord[]
+): SecurityAlert[] {
+  const existingAlerts = loadAlertsFromStorage();
+  const alertMap = new Map<string, SecurityAlert>();
+
+  // Index existing by flowId
+  existingAlerts.forEach(a => alertMap.set(a.flowId, a));
+
+  const flowMap = new Map<string, CleanedFlowRecord>();
+  flows.forEach(f => flowMap.set(f.id, f));
+
+  let newCounter = existingAlerts.length + 1;
+
+  predictions.forEach(pred => {
+    if (pred.predictedLabel === 'SUSPICIOUS') {
+      const flow = flowMap.get(pred.flowId);
+      if (!flow) return;
+
+      // If already exists, preserve its status and investigation notes!
+      if (alertMap.has(flow.id)) {
+        return;
+      }
+
+      const alertId = `ALT-2026-${String(newCounter++).padStart(4, '0')}`;
+      const recommended = getRecommendedActions(pred.predictedCategory, pred.severity, flow.destinationPort);
+
+      const alert: SecurityAlert = {
+        id: alertId,
+        flowId: flow.id,
+        timestamp: flow.timestamp,
+        sourceIp: flow.sourceIp,
+        destinationIp: flow.destinationIp,
+        sourcePort: flow.sourcePort,
+        destinationPort: flow.destinationPort,
+        protocol: flow.protocol,
+        detectionReason: pred.severityReason,
+        predictedCategory: pred.predictedCategory,
+        severity: pred.severity,
+        status: 'New',
+        confidence: pred.confidence,
+        flowDuration: flow.flowDuration,
+        packetCount: flow.packetCount,
+        byteCount: flow.byteCount,
+        flowRate: flow.flowRate,
+        investigationNotes: [
+          {
+            id: `NOTE-${Date.now()}-0`,
+            author: 'NETGUARD Detection Engine',
+            timestamp: pred.detectionTimestamp,
+            text: `Alert generated by ${pred.modelName} (Confidence: ${Math.round(pred.confidence * 100)}%). Categorized as ${pred.predictedCategory} with ${pred.severity} severity.`,
+          },
+        ],
+        recommendedActions: recommended,
+      };
+
+      alertMap.set(flow.id, alert);
+    }
+  });
+
+  const alerts = Array.from(alertMap.values());
+  saveAlertsToStorage(alerts);
+  return alerts;
+}
+
+/**
+ * Load alerts from browser storage (simulating SQLite persistent incident DB)
+ */
+export function loadAlertsFromStorage(): SecurityAlert[] {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return [];
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Save alerts to browser storage
+ */
+export function saveAlertsToStorage(alerts: SecurityAlert[]): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(alerts));
+  } catch (e) {
+    console.error('Failed to save alerts to storage:', e);
+  }
+}
+
+/**
+ * Update an alert status and append analyst notes
+ */
+export function updateAlertStatus(
+  alertId: string,
+  newStatus: AlertStatus,
+  noteText: string,
+  author: string = 'Junior SOC Analyst'
+): SecurityAlert[] {
+  const alerts = loadAlertsFromStorage();
+  const target = alerts.find(a => a.id === alertId);
+
+  if (target) {
+    target.status = newStatus;
+    if (newStatus === 'Resolved' || newStatus === 'False Positive') {
+      target.resolvedAt = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      target.resolutionSummary = noteText || `Marked as ${newStatus} by ${author}.`;
+    }
+
+    if (noteText.trim()) {
+      target.investigationNotes.push({
+        id: `NOTE-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        author,
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        text: noteText.trim(),
+        statusChange: newStatus,
+      });
+    }
+
+    saveAlertsToStorage(alerts);
+  }
+
+  return alerts;
+}
+
+/**
+ * Add a quick note to an incident without status change
+ */
+export function addIncidentNote(
+  alertId: string,
+  noteText: string,
+  author: string = 'Junior SOC Analyst'
+): SecurityAlert[] {
+  const alerts = loadAlertsFromStorage();
+  const target = alerts.find(a => a.id === alertId);
+
+  if (target && noteText.trim()) {
+    target.investigationNotes.push({
+      id: `NOTE-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      author,
+      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      text: noteText.trim(),
+    });
+    saveAlertsToStorage(alerts);
+  }
+
+  return alerts;
+}
+
+/**
+ * Clear all stored alerts (reset state)
+ */
+export function clearStoredAlerts(): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(INCIDENTS_KEY);
+  } catch (e) {
+    console.error('Failed to clear alerts:', e);
+  }
+}

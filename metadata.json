@@ -1,0 +1,6 @@
+{
+  "name": "NETGUARD AI - Network Intrusion Detection & SOC Monitoring",
+  "description": "AI-based network intrusion detection, threat classification, SOC alert triage, and incident management system for security analysts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

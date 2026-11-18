@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Production build outputs
+build/
+dist/
+coverage/
+
+# Logs & OS files
+*.log
+.DS_Store
+
+# Environment variables & secrets (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Python companion environment & SQLite databases
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.db
+*.sqlite
+*.sqlite3
+python_project/database/*.db
+python_project/database/*.sqlite
